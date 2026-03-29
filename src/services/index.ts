@@ -1,4 +1,4 @@
-import eastmoney from './eastmoney'
+import eastmoney, { eastmoneySearchSuggest } from './eastmoney'
 import hkstock from './hkstock'
 import usstock from './usstock'
 
@@ -76,22 +76,46 @@ export async function getStockBasicInfo(code: string, market: 'A' | 'HK' | 'US')
  * 搜索股票
  */
 export async function searchStock(keyword: string, market?: 'A' | 'HK' | 'US') {
-  if (market === 'A') {
-    return eastmoney.searchAStock(keyword)
-  } else if (market === 'HK') {
-    return hkstock.searchHKStock(keyword)
-  } else if (market === 'US') {
+  if (market === 'US') {
     return usstock.searchUSStock(keyword)
   }
-  
-  // 搜索所有市场
-  const [a, hk, us] = await Promise.all([
-    eastmoney.searchAStock(keyword),
-    hkstock.searchHKStock(keyword),
-    usstock.searchUSStock(keyword)
-  ])
-  
-  return [...a, ...hk, ...us]
+
+  if (market === 'A') {
+    return eastmoney.searchAStock(keyword)
+  }
+
+  if (market === 'HK') {
+    return hkstock.searchHKStock(keyword)
+  }
+
+  const [rows, us] = await Promise.all([eastmoneySearchSuggest(keyword, 28), usstock.searchUSStock(keyword)])
+  const seen = new Set<string>()
+  const out: Array<{ code: string; name: string; market: 'A' | 'HK' | 'US'; type?: string }> = []
+
+  for (const r of rows) {
+    const k = `${r.market}-${r.code}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    if (r.market === 'A') {
+      out.push({
+        code: r.code,
+        name: r.name,
+        market: 'A',
+        type: r.code.startsWith('6') ? 'SH' : 'SZ'
+      })
+    } else {
+      out.push({ code: r.code, name: r.name, market: r.market })
+    }
+  }
+
+  for (const u of us) {
+    const k = `US-${u.code}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(u)
+  }
+
+  return out.slice(0, 25)
 }
 
 export { eastmoney, hkstock, usstock }

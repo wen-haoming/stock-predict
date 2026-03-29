@@ -127,40 +127,103 @@ export async function getAStockBasicInfo(stockCode: string) {
   }
 }
 
+const EASTMONEY_SUGGEST = 'https://searchapi.eastmoney.com/api/suggest/get'
+const EASTMONEY_SUGGEST_TOKEN = 'D43BF722C8E33BDC906FB84D85E326E8'
+
+/** 东财 suggest 当前为 QuotationCodeTable.Data，旧版为 Quodata */
+function normalizeSuggestRows(data: any): any[] {
+  const table = data?.QuotationCodeTable?.Data
+  if (Array.isArray(table) && table.length > 0) return table
+  const legacy = data?.Quodata
+  if (!Array.isArray(legacy) || legacy.length === 0) return []
+  return legacy.map((item: any) => ({
+    Code: item.SecurityCode,
+    Name: item.SecurityName,
+    Classify: item.Classify,
+    JYS: item.JYS,
+    SecurityTypeName: item.SecurityTypeName,
+    SecurityType: item.SecurityType
+  }))
+}
+
+function suggestRowMarket(row: any): 'A' | 'HK' | 'US' | null {
+  const c = row.Classify || ''
+  const jys = String(row.JYS || '')
+  if (c === 'HK' || jys === 'HK') return 'HK'
+  if (c === 'UsStock' || String(row.SecurityTypeName || '').includes('美股')) return 'US'
+  if (c === 'AStock') return 'A'
+  if (/^\d{6}$/.test(String(row.Code || '').trim())) return 'A'
+  return null
+}
+
+/** 排除可转债、票据等非普通股 */
+function suggestRowIsCommonEquity(row: any): boolean {
+  const st = String(row.SecurityType ?? '')
+  const name = String(row.Name || row.SecurityName || '')
+  if (/Notes|票据|债券|转债|ETF|基金/i.test(name)) return false
+  return ['1', '19', '20'].includes(st)
+}
+
+export interface EastmoneySearchHit {
+  code: string
+  name: string
+  market: 'A' | 'HK' | 'US'
+}
+
+/**
+ * 东财统一联想（A / 港股 / 美股），勿再传 markettype=8 等过时参数
+ */
+export async function eastmoneySearchSuggest(keyword: string, maxCount = 30): Promise<EastmoneySearchHit[]> {
+  const response = await axios.get(EASTMONEY_SUGGEST, {
+    params: {
+      input: keyword.trim(),
+      type: '14',
+      token: EASTMONEY_SUGGEST_TOKEN,
+      page: 1,
+      count: maxCount
+    },
+    timeout: 10000,
+    headers: {
+      Referer: 'https://www.eastmoney.com/',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+  })
+
+  const rows = normalizeSuggestRows(response.data)
+  const out: EastmoneySearchHit[] = []
+  const seen = new Set<string>()
+
+  for (const row of rows) {
+    if (!suggestRowIsCommonEquity(row)) continue
+    const market = suggestRowMarket(row)
+    if (!market) continue
+    const code = String(row.Code || '').trim()
+    const name = String(row.Name || '').trim()
+    if (!code || !name) continue
+    const key = `${market}-${code}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ code, name, market })
+  }
+  return out
+}
+
 /**
  * 搜索股票
  * @param keyword 搜索关键词
  */
 export async function searchAStock(keyword: string) {
   try {
-    // 东财股票搜索
-    const response = await axios.get('https://searchapi.eastmoney.com/api/suggest/get', {
-      params: {
-        input: keyword,
-        type: '14',
-        token: 'D43BF722C8E33BDC906FB84D85E326E8',
-        markettype: '',
-        mktnum: '',
-        jys: '',
-        classb: '',
-        object: '',
-        status: '',
-        page: 1,
-        count: 10
-      },
-      timeout: 10000
-    })
-
-    if (response.data?.Quodata) {
-      return response.data.Quodata.map((item: any) => ({
-        code: item.SecurityCode,
-        name: item.SecurityName,
+    const hits = await eastmoneySearchSuggest(keyword, 35)
+    return hits
+      .filter((h) => h.market === 'A')
+      .slice(0, 10)
+      .map((item) => ({
+        code: item.code,
+        name: item.name,
         market: 'A' as const,
-        type: item.TradeMarket === '上交所' ? 'SH' : 'SZ'
+        type: item.code.startsWith('6') ? ('SH' as const) : ('SZ' as const)
       }))
-    }
-
-    return []
   } catch (error) {
     console.error('搜索股票失败:', error)
     return []

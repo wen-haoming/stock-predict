@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Card, Space, Tag, Spin, Select } from 'antd'
+import { Card, Space, Tag, Spin, Select, Empty } from 'antd'
 import { AreaChartOutlined } from '@ant-design/icons'
 import { createChart, IChartApi, ISeriesApi, CandlestickData, LineData } from 'lightweight-charts'
 
@@ -152,30 +152,7 @@ const StockChart: React.FC<StockChartProps> = ({ stockCode, klineData, loading }
     chartRef.current?.timeScale().fitContent()
   }, [klineData])
 
-  // 生成模拟数据
-  const generateMockData = () => {
-    const data = []
-    const now = new Date()
-    let price = 180
-    
-    for (let i = 100; i >= 0; i--) {
-      const date = new Date(now)
-      date.setDate(date.getDate() - i)
-      const dateStr = date.toISOString().split('T')[0]
-      
-      const change = (Math.random() - 0.5) * 5
-      const open = price
-      const close = price + change
-      const high = Math.max(open, close) + Math.random() * 2
-      const low = Math.min(open, close) - Math.random() * 2
-      
-      data.push({ date: dateStr, open, close, high, low, volume: Math.random() * 10000000 })
-      price = close
-    }
-    return data
-  }
-
-  const mockData = generateMockData()
+  const hasKline = Boolean(klineData && klineData.length > 0)
 
   return (
     <Card 
@@ -198,16 +175,18 @@ const StockChart: React.FC<StockChartProps> = ({ stockCode, klineData, loading }
         />
       }
     >
-      {loading ? (
-        <div className="h-80 flex items-center justify-center">
-          <Spin tip="加载中..." />
-        </div>
-      ) : (
-        <div 
-          ref={containerRef} 
-          className="h-80 w-full bg-[#0d1117] rounded-lg"
-        />
-      )}
+      <div ref={containerRef} className="h-80 w-full bg-[#0d1117] rounded-lg relative">
+        {loading && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center rounded-lg bg-[#0d1117]/80">
+            <Spin tip="加载中..." />
+          </div>
+        )}
+        {!loading && !hasKline && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-[#0d1117]/95 border border-dashed border-[#30363d]">
+            <Empty description={<span className="text-[#8b949e]">暂无 K 线数据（请确认后端与行情源可用）</span>} />
+          </div>
+        )}
+      </div>
       
       {/* 图例 */}
       <div className="flex items-center gap-4 mt-3 text-xs">

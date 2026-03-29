@@ -1,5 +1,8 @@
 import axios from 'axios'
 import { buildAnalysisPrompt, parseAnalysisResult, AnalysisRequest } from './prompt'
+import { loadProjectEnv } from '../env/loadProjectEnv'
+
+loadProjectEnv(import.meta.url)
 import { getStockQuote, getStockKLine, getStockBasicInfo, searchStock } from '../services'
 import { calculateTechnicalIndicators } from '../factors/technical'
 import { getMacroData } from '../factors/macro'
@@ -48,23 +51,26 @@ export interface AnalysisResult {
 }
 
 /**
- * 调用 MiniMax AI API
+ * OpenAI 兼容接口（/v1/chat/completions），密钥见 ANALYSIS_API_KEY 或 OPENAI_API_KEY
  */
-async function callMinimaxAI(prompt: string): Promise<string> {
-  const apiKey = process.env.MINIMAX_API_KEY || ''
-  
-  if (!apiKey) {
-    console.warn('未设置 MINIMAX_API_KEY，使用模拟响应')
-    return generateMockResponse()
-  }
+async function callOpenAICompatible(prompt: string): Promise<string | null> {
+  const apiKey = (process.env.ANALYSIS_API_KEY || process.env.OPENAI_API_KEY || '').trim()
+  if (!apiKey) return null
+
+  const base = (process.env.ANALYSIS_API_BASE || 'https://api.openai.com/v1').replace(/\/$/, '')
+  const model = process.env.ANALYSIS_MODEL || 'gpt-4o-mini'
 
   try {
     const response = await axios.post(
-      'https://api.minimax.chat/v1/text/chatcompletion_pro',
+      `${base}/chat/completions`,
       {
-        model: 'MiniMax-2.7-联网',
+        model,
         messages: [
-          { role: 'system', content: '你是一个专业的股票拐点分析师，基于数据分析给出客观的投资建议。核心原则：买入的是预期，卖出的是事实。' },
+          {
+            role: 'system',
+            content:
+              '你是一个专业的股票拐点分析师，基于数据分析给出客观的投资建议。核心原则：买入的是预期，卖出的是事实。请严格按用户要求的 JSON 格式输出，不要输出 Markdown 代码围栏。'
+          },
           { role: 'user', content: prompt }
         ],
         temperature: 0.7,
@@ -72,72 +78,93 @@ async function callMinimaxAI(prompt: string): Promise<string> {
       },
       {
         headers: {
-          'Authorization': `Bearer ${apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json'
         },
-        timeout: 30000
+        timeout: 120000
       }
     )
-
-    return response.data.choices?.[0]?.message?.content || ''
+    const text = response.data?.choices?.[0]?.message?.content
+    return typeof text === 'string' ? text : null
   } catch (error) {
-    console.error('MiniMax API 调用失败:', error)
-    return generateMockResponse()
+    console.error('OpenAI 兼容 API 调用失败:', error)
+    return null
   }
 }
 
 /**
- * 生成模拟响应
+ * MiniMax OpenAI 兼容 Chat（官方文档：https://platform.minimax.io/docs/api-reference/text-openai-api ）
+ * 环境变量：MINIMAX_API_KEY、可选 MINIMAX_API_BASE（默认 https://api.minimax.io/v1）、MINIMAX_MODEL（默认 MiniMax-M2.7）
  */
-function generateMockResponse(): string {
-  const phases = ['预期阶段', '事实阶段']
-  const trends = ['上涨趋势', '下跌趋势', '震荡']
-  const suggestions = ['buy', 'hold', 'sell']
-  
-  const phase = phases[Math.floor(Math.random() * phases.length)]
-  const trend = trends[Math.floor(Math.random() * trends.length)]
-  const suggestion = suggestions[Math.floor(Math.random() * suggestions.length)]
-  
-  return JSON.stringify({
-    trend,
-    phase,
-    trendReason: '均线空头排列，MACD 死叉后收敛，量能萎缩至地量',
-    prediction: {
-      date: '2026-04-20',
-      confidence: 65 + Math.floor(Math.random() * 20),
-      reason: '技术面超卖 + 宏观预期改善 + 资金面支持'
+function resolveMinimaxApiKey(): string {
+  const direct = (process.env.MINIMAX_API_KEY || process.env.AI_API_KEY || '').trim()
+  if (direct) return direct
+  const base = (process.env.ANALYSIS_API_BASE || '').toLowerCase()
+  if (base.includes('minimax') && process.env.ANALYSIS_API_KEY) {
+    return process.env.ANALYSIS_API_KEY.trim()
+  }
+  return ''
+}
+
+async function callMinimaxChatCompletions(prompt: string): Promise<string | null> {
+  const apiKey = resolveMinimaxApiKey()
+  if (!apiKey) return null
+
+  const base = (process.env.MINIMAX_API_BASE || 'https://api.minimax.io/v1').replace(/\/$/, '')
+  const model = process.env.MINIMAX_MODEL || 'MiniMax-M2.7'
+
+  const response = await axios.post(
+    `${base}/chat/completions`,
+    {
+      model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是一个专业的股票拐点分析师，基于数据分析给出客观的投资建议。核心原则：买入的是预期，卖出的是事实。请严格按用户要求的 JSON 格式输出，不要使用 Markdown 代码围栏。'
+        },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 2000
     },
-    suggestion: {
-      type: suggestion,
-      price: suggestion === 'buy' ? '175.00' : null,
-      date: '2026-04-15',
-      reason: suggestion === 'buy' 
-        ? '当前处于预期阶段，年报已跌完，逢低布局等待拐点' 
-        : suggestion === 'sell' 
-        ? '利好兑现，考虑减仓' 
-        : '持有观望，等待方向明确'
-    },
-    riskFactors: ['消费复苏不及预期', '行业政策变化', '流动性风险'],
-    scores: {
-      macro: 60 + Math.floor(Math.random() * 20),
-      industry: 55 + Math.floor(Math.random() * 20),
-      technical: 45 + Math.floor(Math.random() * 30),
-      financial: 55 + Math.floor(Math.random() * 25),
-      fund: 60 + Math.floor(Math.random() * 20),
-      cycle: 50 + Math.floor(Math.random() * 20),
-      event: 50 + Math.floor(Math.random() * 15),
-      total: 55 + Math.floor(Math.random() * 25)
-    },
-    signals: {
-      macro: '偏多',
-      industry: '中性',
-      technical: '偏空',
-      financial: '中性',
-      fund: '偏多',
-      cycle: '中性',
-      event: '等待'
+    {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 120000
     }
-  })
+  )
+
+  let text = response.data?.choices?.[0]?.message?.content
+  if (typeof text !== 'string') return null
+  // M2.x 可能在正文中夹带思考标签，解析前去掉
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
+  return text || null
+}
+
+/**
+ * 优先 MiniMax（国内账号常用），其次 ANALYSIS_API_KEY + 自定义 BASE（可为 OpenAI 或其他兼容端）
+ * 不再在失败时静默返回随机 JSON，避免前端误以为真分析结果
+ */
+async function callAnalysisAI(prompt: string): Promise<string> {
+  if (resolveMinimaxApiKey()) {
+    try {
+      const t = await callMinimaxChatCompletions(prompt)
+      if (t) return t
+    } catch (error) {
+      console.error('MiniMax API 调用失败:', error)
+    }
+  }
+
+  const fromOpenAI = await callOpenAICompatible(prompt)
+  if (fromOpenAI) return fromOpenAI
+
+  console.warn(
+    '未配置可用 AI：请在项目根 .env 设置 MINIMAX_API_KEY / AI_API_KEY，或 ANALYSIS_API_KEY + ANALYSIS_API_BASE'
+  )
+  return ''
 }
 
 /**
@@ -154,7 +181,7 @@ export async function analyzeStock(
     // 1. 获取股票行情
     const quote = await getStockQuote(code, market)
     if (!quote) {
-      console.warn('获取行情失败，使用模拟数据')
+      console.warn('获取行情失败，将继续用 K 线与因子做有限分析')
     }
 
     // 2. 获取 K 线数据
@@ -222,29 +249,38 @@ export async function analyzeStock(
       weights: weights || DEFAULT_WEIGHTS
     })
 
-    console.log('发送分析请求到 MiniMax...')
+    console.log('发送分析请求到 AI（MiniMax / OpenAI 兼容）...')
 
     // 7. 调用 AI
-    const response = await callMinimaxAI(extendedPrompt)
-    console.log('收到 AI 响应')
+    const response = await callAnalysisAI(extendedPrompt)
+    console.log('收到 AI 响应', response ? `长度 ${response.length}` : '（空）')
 
     // 8. 解析结果
-    const result = parseAnalysisResult(response)
+    const result = response ? parseAnalysisResult(response) : null
 
     if (result) {
       console.log('分析成功:', result.trend, result.phase)
       return result
     }
 
-    // 解析失败，返回默认结果
+    const noKey =
+      !resolveMinimaxApiKey() &&
+      !(process.env.ANALYSIS_API_KEY || '').trim() &&
+      !(process.env.OPENAI_API_KEY || '').trim()
+    const fallbackReason = noKey
+      ? '未配置 AI：请在项目根目录 .env 中设置 MINIMAX_API_KEY（见 https://platform.minimaxi.com 代币计划）。以下为基于本地行情与技术面的简要结论，非大模型分析。'
+      : response
+        ? 'AI 已返回但 JSON 解析失败，请查看服务端日志。以下为基于技术面的简要结论。'
+        : 'AI 无有效返回或调用失败，请检查密钥、余额与 MINIMAX_API_BASE。以下为基于技术面的简要结论。'
+
     return {
       trend: technicalIndicators.trend,
       phase: '待分析',
-      trendReason: '综合多因子分析',
+      trendReason: fallbackReason,
       prediction: {
         date: null,
         confidence: technicalIndicators.score,
-        reason: '基于技术面和宏观因子综合判断'
+        reason: '基于技术面和已抓取的因子数据的技术性总结（非 LLM 正文）'
       },
       suggestion: {
         type: technicalIndicators.score > 60 ? 'buy' : technicalIndicators.score < 40 ? 'sell' : 'hold',
@@ -252,7 +288,7 @@ export async function analyzeStock(
         date: null,
         reason: technicalIndicators.score > 60 ? '技术面偏多' : technicalIndicators.score < 40 ? '技术面偏空' : '观望'
       },
-      riskFactors: ['数据获取异常']
+      riskFactors: ['AI 分析不可用或解析失败', '请优先完成 MiniMax 配置后重试']
     }
   } catch (error) {
     console.error('分析股票失败:', error)

@@ -55,62 +55,39 @@ function App() {
     setKlineData([])
     
     try {
-      // 尝试调用后端 API
-      const response = await fetch(`${API_BASE}/api/stock/${code}`)
-      if (response.ok) {
-        const stockData = await response.json()
-        setQuote(stockData.quote)
-        setKlineData(stockData.kline || [])
-        
-        // 调用分析
-        const analyzeResponse = await fetch(`${API_BASE}/api/analyze`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code, market: m })
-        })
-        
-        if (analyzeResponse.ok) {
-          const analysisData = await analyzeResponse.json()
-          setAnalysisResult(analysisData)
-        }
-      } else {
-        throw new Error('API 不可用')
+      const enc = encodeURIComponent(code)
+      const stockRes = await fetch(`${API_BASE}/api/stock/${enc}?market=${m}`)
+      if (!stockRes.ok) {
+        message.error('加载行情失败，请确认后端已启动（pnpm dev）且代码与市场一致')
+        setAnalysisResult(null)
+        return
       }
+      const stockData = await stockRes.json()
+      setQuote(stockData.quote)
+      setKlineData(stockData.kline || [])
+
+      const analyzeRes = await fetch(`${API_BASE}/api/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, market: m })
+      })
+      const analysisBody = await analyzeRes.json().catch(() => null)
+      if (!analyzeRes.ok) {
+        setAnalysisResult(null)
+        message.error(
+          typeof analysisBody?.error === 'string' ? analysisBody.error : `AI 分析失败（${analyzeRes.status}）`
+        )
+        return
+      }
+      setAnalysisResult(analysisBody)
     } catch (error: any) {
-      // API 失败时使用模拟数据
-      console.error('使用模拟数据:', error)
-      const mockResult = generateMockResult()
-      setAnalysisResult(mockResult)
-      message.warning('使用模拟数据进行演示')
+      console.error(error)
+      setAnalysisResult(null)
+      message.error('请求失败，请检查网络与后端服务')
     } finally {
       setLoading(false)
     }
   }, [])
-
-  // 生成模拟结果
-  const generateMockResult = () => {
-    const trends = ['上涨趋势', '下跌趋势', '震荡']
-    const phases = ['预期阶段', '事实阶段']
-    const types = ['buy', 'sell', 'hold']
-    
-    return {
-      trend: trends[Math.floor(Math.random() * trends.length)],
-      phase: phases[Math.floor(Math.random() * phases.length)],
-      trendReason: '均线空头排列，MACD 死叉后收敛，量能萎缩至地量',
-      prediction: {
-        date: '2026-04-20',
-        confidence: 65 + Math.floor(Math.random() * 20),
-        reason: '技术面超卖 + 宏观预期改善 + 业绩拐点将至'
-      },
-      suggestion: {
-        type: types[Math.floor(Math.random() * types.length)],
-        price: '175.00',
-        date: '2026-04-15',
-        reason: '当前处于预期阶段，年报已跌完，逢低布局等待拐点'
-      },
-      riskFactors: ['消费复苏不及预期', '行业政策变化', '流动性风险']
-    }
-  }
 
   // 切换市场
   const handleMarketChange = (m: 'A' | 'HK' | 'US') => {
@@ -175,8 +152,10 @@ function App() {
           />
           
           <StockSearch
+            market={market}
+            value={stockCode}
             placeholder={market === 'A' ? '输入代码，如 600519' : market === 'HK' ? '输入代码，如 00700' : '输入代码，如 AAPL'}
-            onChange={(code, m) => setStockCode(code)}
+            onChange={(code) => setStockCode(code)}
             onSearch={handleSearch}
           />
           
@@ -300,7 +279,7 @@ function App() {
               {activeTab === 'chart' ? (
                 <StockChart stockCode={stockCode} klineData={klineData.length > 0 ? klineData : undefined} loading={loading} />
               ) : (
-                <TimelineView stockCode={stockCode} />
+                <TimelineView stockCode={stockCode} market={market} />
               )}
             </div>
 

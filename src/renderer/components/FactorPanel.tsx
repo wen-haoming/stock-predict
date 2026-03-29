@@ -44,11 +44,14 @@ const FactorPanel: React.FC<FactorPanelProps> = ({
     
     const allFactors: FactorItem[] = []
     Object.entries(FACTOR_DETAILS).forEach(([category, config]) => {
-      config.factors.forEach(factor => {
+      const budget = DEFAULT_WEIGHTS[category as keyof FactorWeights]
+      const sumW = config.factors.reduce((s, f) => s + f.weight, 0) || 1
+      config.factors.forEach((factor) => {
+        const w = Math.max(1, Math.round((factor.weight / sumW) * budget))
         allFactors.push({
           key: factor.key,
           name: factor.name,
-          weight: factor.weight,
+          weight: w,
           description: factor.description,
           locked: false,
           value: '-',

@@ -166,8 +166,12 @@ ${OUTPUT_FORMAT}
  */
 export function parseAnalysisResult(content: string): any {
   try {
+    let text = content.trim()
+    const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)```/m)
+    if (fenced) text = fenced[1].trim()
+
     // 尝试提取 JSON 部分
-    const jsonMatch = content.match(/\{[\s\S]*\}/)
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (jsonMatch) {
       return JSON.parse(jsonMatch[0])
     }
