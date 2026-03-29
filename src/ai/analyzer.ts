@@ -1,4 +1,4 @@
-import axios from 'axios'
+import axios, { isAxiosError } from 'axios'
 import { buildAnalysisPrompt, parseAnalysisResult, AnalysisRequest } from './prompt'
 import { loadProjectEnv } from '../env/loadProjectEnv'
 
@@ -50,6 +50,33 @@ export interface AnalysisResult {
   }
 }
 
+function hasOpenAICompatibleKey(): boolean {
+  return !!(process.env.ANALYSIS_API_KEY || process.env.OPENAI_API_KEY)?.trim()
+}
+
+/** 只记录状态与响应体片段，避免打印 axios 完整对象（会带出 Authorization） */
+function logAiHttpError(provider: string, err: unknown): void {
+  if (isAxiosError(err)) {
+    const status = err.response?.status
+    const data = err.response?.data
+    let body = ''
+    try {
+      body = typeof data === 'string' ? data : data !== undefined ? JSON.stringify(data) : ''
+    } catch {
+      body = String(data)
+    }
+    if (body.length > 1200) body = body.slice(0, 1200) + '…'
+    console.error(`${provider} HTTP ${status ?? '(无状态)'}${body ? `: ${body}` : ''}`)
+    if (status === 401) {
+      console.error(
+        `${provider} 401：服务端拒绝了当前密钥。请核对：① Token Plan 专用 Key 是否在订阅有效期内，且未与「按量付费」Key 混用；② MINIMAX_API_BASE 是否与申请密钥的站点一致（中文站 Token Plan 常用 https://api.minimaxi.com/v1 ，对应文档里的 Anthropic 基址为 https://api.minimaxi.com/anthropic）；③ 若密钥曾泄露，请到控制台换新。说明：https://platform.minimaxi.com/docs/faq/about-apis`
+      )
+    }
+    return
+  }
+  console.error(`${provider} 调用异常:`, err instanceof Error ? err.message : err)
+}
+
 /**
  * OpenAI 兼容接口（/v1/chat/completions），密钥见 ANALYSIS_API_KEY 或 OPENAI_API_KEY
  */
@@ -87,14 +114,14 @@ async function callOpenAICompatible(prompt: string): Promise<string | null> {
     const text = response.data?.choices?.[0]?.message?.content
     return typeof text === 'string' ? text : null
   } catch (error) {
-    console.error('OpenAI 兼容 API 调用失败:', error)
+    logAiHttpError('OpenAI 兼容 API', error)
     return null
   }
 }
 
 /**
- * MiniMax OpenAI 兼容 Chat（官方文档：https://platform.minimax.io/docs/api-reference/text-openai-api ）
- * 环境变量：MINIMAX_API_KEY、可选 MINIMAX_API_BASE（默认 https://api.minimax.io/v1）、MINIMAX_MODEL（默认 MiniMax-M2.7）
+ * MiniMax OpenAI 兼容 Chat（文档：https://platform.minimaxi.com/docs/api-reference/text-openai-api ）
+ * 环境变量：MINIMAX_API_KEY、可选 MINIMAX_API_BASE（默认 https://api.minimaxi.com/v1 ，与 Token Plan 文档中 Anthropic 基址 api.minimaxi.com 同域）、MINIMAX_MODEL（默认 MiniMax-M2.7）
  */
 function resolveMinimaxApiKey(): string {
   const direct = (process.env.MINIMAX_API_KEY || process.env.AI_API_KEY || '').trim()
@@ -110,38 +137,46 @@ async function callMinimaxChatCompletions(prompt: string): Promise<string | null
   const apiKey = resolveMinimaxApiKey()
   if (!apiKey) return null
 
-  const base = (process.env.MINIMAX_API_BASE || 'https://api.minimax.io/v1').replace(/\/$/, '')
+  const base = (process.env.MINIMAX_API_BASE || 'https://api.minimaxi.com/v1').replace(/\/$/, '')
   const model = process.env.MINIMAX_MODEL || 'MiniMax-M2.7'
 
-  const response = await axios.post(
-    `${base}/chat/completions`,
-    {
-      model,
-      messages: [
-        {
-          role: 'system',
-          content:
-            '你是一个专业的股票拐点分析师，基于数据分析给出客观的投资建议。核心原则：买入的是预期，卖出的是事实。请严格按用户要求的 JSON 格式输出，不要使用 Markdown 代码围栏。'
-        },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.7,
-      max_tokens: 2000
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
+  try {
+    const response = await axios.post(
+      `${base}/chat/completions`,
+      {
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你是一个专业的股票拐点分析师，基于数据分析给出客观的投资建议。核心原则：买入的是预期，卖出的是事实。请严格按用户要求的 JSON 格式输出，不要使用 Markdown 代码围栏。'
+          },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 2000
       },
-      timeout: 120000
-    }
-  )
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          ...(process.env.MINIMAX_GROUP_ID?.trim()
+            ? { 'Group-Id': process.env.MINIMAX_GROUP_ID.trim() }
+            : {})
+        },
+        timeout: 120000
+      }
+    )
 
-  let text = response.data?.choices?.[0]?.message?.content
-  if (typeof text !== 'string') return null
-  // M2.x 可能在正文中夹带思考标签，解析前去掉
-  text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
-  return text || null
+    let text = response.data?.choices?.[0]?.message?.content
+    if (typeof text !== 'string') return null
+    // M2.x 可能在正文中夹带思考标签，解析前去掉
+    text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
+    return text || null
+  } catch (err) {
+    logAiHttpError('MiniMax', err)
+    return null
+  }
 }
 
 /**
@@ -149,21 +184,24 @@ async function callMinimaxChatCompletions(prompt: string): Promise<string | null
  * 不再在失败时静默返回随机 JSON，避免前端误以为真分析结果
  */
 async function callAnalysisAI(prompt: string): Promise<string> {
-  if (resolveMinimaxApiKey()) {
-    try {
-      const t = await callMinimaxChatCompletions(prompt)
-      if (t) return t
-    } catch (error) {
-      console.error('MiniMax API 调用失败:', error)
-    }
+  const minimaxKey = resolveMinimaxApiKey()
+  if (minimaxKey) {
+    const t = await callMinimaxChatCompletions(prompt)
+    if (t) return t
   }
 
   const fromOpenAI = await callOpenAICompatible(prompt)
   if (fromOpenAI) return fromOpenAI
 
-  console.warn(
-    '未配置可用 AI：请在项目根 .env 设置 MINIMAX_API_KEY / AI_API_KEY，或 ANALYSIS_API_KEY + ANALYSIS_API_BASE'
-  )
+  if (!minimaxKey && !hasOpenAICompatibleKey()) {
+    console.warn(
+      '未配置可用 AI：请在项目根 .env 设置 MINIMAX_API_KEY / AI_API_KEY，或 ANALYSIS_API_KEY + ANALYSIS_API_BASE'
+    )
+  } else {
+    console.warn(
+      'AI 未返回可用正文：请查看上方 MiniMax / OpenAI 的 HTTP 日志（401 多为密钥无效、类型与套餐不匹配或泄露后被停用；1008 为余额不足）'
+    )
+  }
   return ''
 }
 
@@ -263,12 +301,9 @@ export async function analyzeStock(
       return result
     }
 
-    const noKey =
-      !resolveMinimaxApiKey() &&
-      !(process.env.ANALYSIS_API_KEY || '').trim() &&
-      !(process.env.OPENAI_API_KEY || '').trim()
+    const noKey = !resolveMinimaxApiKey() && !hasOpenAICompatibleKey()
     const fallbackReason = noKey
-      ? '未配置 AI：请在项目根目录 .env 中设置 MINIMAX_API_KEY（见 https://platform.minimaxi.com 代币计划）。以下为基于本地行情与技术面的简要结论，非大模型分析。'
+      ? '未配置 AI：请在项目根目录 .env 中设置 MINIMAX_API_KEY（Token Plan 见 https://platform.minimaxi.com/subscribe/token-plan）。以下为基于本地行情与技术面的简要结论，非大模型分析。'
       : response
         ? 'AI 已返回但 JSON 解析失败，请查看服务端日志。以下为基于技术面的简要结论。'
         : 'AI 无有效返回或调用失败，请检查密钥、余额与 MINIMAX_API_BASE。以下为基于技术面的简要结论。'
